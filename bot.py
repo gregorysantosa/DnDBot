@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-GUILD_ID = 1402852211083448380
-
+GUILD_ID = 856322099239845919
+# 856322099239845919 <- DnD
+# 1402852211083448380 <- Dev
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -238,7 +239,7 @@ async def event(interaction: discord.Interaction, title: str, description: str, 
         value="No one yet.",
         inline=True
     )
-    embed.set_footer(text=f"Created by {interaction.user.display_name} • Repeats weekly")
+    embed.set_footer(text=f"Created by {interaction.user.display_name}")
 
     await interaction.response.send_message(embed=embed)
     message = await interaction.original_response()

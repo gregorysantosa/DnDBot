@@ -4,11 +4,15 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from dateutil import parser
+import asyncio
+from datetime import datetime, timezone
+
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID = 856322099239845919
 # 856322099239845919 <- DnD
 # 1402852211083448380 <- Dev
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -20,6 +24,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Store signups keyed by message ID
 # accepted: dict user_id -> character description (str)
 # waitlist: set of user_ids
+# Also store event_time as datetime
 event_signups = {}
 
 def format_accepted(accepted_dict):
@@ -209,11 +214,67 @@ class EventView(discord.ui.View):
 
 allowed_user_ids = {284137393483939841, 261651766213345282}  # Replace with actual Discord user IDs
 
+async def schedule_event_reminder(message_id: int):
+    signups = event_signups.get(message_id)
+    if not signups:
+        return  # event expired or deleted
+
+    event_time = signups.get("event_time")
+    if not event_time:
+        return
+
+    reminder_time = event_time.timestamp() - 15*60  # 15 minutes before event start (in seconds)
+    now = datetime.now(timezone.utc).timestamp()
+    wait_seconds = reminder_time - now
+
+    if wait_seconds <= 0:
+        # Event is soon or passed, skip or send immediately
+        wait_seconds = 0
+
+    await asyncio.sleep(wait_seconds)
+
+    # After waiting, send reminder message
+    channel = None
+    message = None
+
+    # Try to find the message's channel and message
+    for guild in bot.guilds:
+        for channel_candidate in guild.text_channels:
+            try:
+                message = await channel_candidate.fetch_message(message_id)
+                channel = channel_candidate
+                break
+            except discord.NotFound:
+                continue
+            except discord.Forbidden:
+                continue
+        if message:
+            break
+
+    if not message or not channel:
+        return  # message not found or inaccessible
+
+    accepted = signups.get("accepted", {})
+    if not accepted:
+        return  # no participants to notify
+
+    mentions = []
+    for user_id in accepted.keys():
+        member = channel.guild.get_member(user_id)
+        if member:
+            mentions.append(member.mention)
+
+    if not mentions:
+        return  # no members to mention
+
+    mention_text = " ".join(mentions)
+    await channel.send(f"⏰ Reminder: The event **{message.embeds[0].title}** starts in 15 minutes! {mention_text}")
+
 @bot.tree.command(name="event", description="Create a custom event embed")
 @app_commands.describe(
     title="Title of your event",
     description="Description for the event",
-    time="Date and time for the event in ISO 8601 format, e.g. 2025-08-11T18:30",
+    time="Date and time for the event in ISO 8601 format, YYYY-MM-DDTHH:MM:SS-7:00",
     roles_to_ping="Roles to ping (mention them here)",
     max_participants="Maximum number of participants allowed",
     image_url="Optional URL of an image to display below description"
@@ -233,6 +294,11 @@ async def event(
 
     try:
         parsed_time = parser.isoparse(time)
+        # Ensure datetime is timezone aware UTC
+        if parsed_time.tzinfo is None:
+            parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+        else:
+            parsed_time = parsed_time.astimezone(timezone.utc)
     except Exception:
         await interaction.response.send_message("Invalid time format. Use ISO8601 (YYYY-MM-DDTHH:MM:SS).", ephemeral=True)
         return
@@ -260,12 +326,20 @@ async def event(
 
     message = await interaction.original_response()
 
-    # Initialize signup lists
-    event_signups[message.id] = {"accepted": {}, "waitlist": set(), "max_participants": max_participants}
+    # Initialize signup lists and store event time
+    event_signups[message.id] = {
+        "accepted": {},
+        "waitlist": set(),
+        "max_participants": max_participants,
+        "event_time": parsed_time
+    }
 
     # Add buttons
     view = EventView(message.id, max_participants)
     await message.edit(view=view)
+
+    # Schedule the reminder task
+    bot.loop.create_task(schedule_event_reminder(message.id))
 
 @bot.event
 async def on_ready():

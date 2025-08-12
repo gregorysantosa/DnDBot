@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-
+from dateutil import parser
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID = 856322099239845919
@@ -42,11 +42,12 @@ def format_waitlist(waitlist_set):
         lines.append(name)
     return "\n".join(lines)
 
-class JoinModal(discord.ui.Modal, title="Enter Your Character Description"):
-    def __init__(self, message_id, user_id):
+class JoinModal(discord.ui.Modal, title="Format: {Name} - {Lvl} {Class}"):
+    def __init__(self, message_id, user_id, max_participants):
         super().__init__()
         self.message_id = message_id
         self.user_id = user_id
+        self.max_participants = max_participants
 
     character_desc = discord.ui.TextInput(
         label="Character Description",
@@ -72,15 +73,14 @@ class JoinModal(discord.ui.Modal, title="Enter Your Character Description"):
             await interaction.response.send_message("You are on the waitlist. Use Leave to remove yourself first.", ephemeral=True)
             return
 
-        if len(accepted) < 7:
+        if len(accepted) < self.max_participants:
             accepted[self.user_id] = self.character_desc.value
-            # Update embed
             channel = bot.get_channel(interaction.channel_id)
             message = await channel.fetch_message(self.message_id)
             embed = message.embeds[0]
             embed.set_field_at(
                 1,
-                name=f"✅ Accepted ({len(accepted)}/7)",
+                name=f"✅ Accepted ({len(accepted)}/{self.max_participants})",
                 value=format_accepted(accepted),
                 inline=True
             )
@@ -96,9 +96,10 @@ class JoinModal(discord.ui.Modal, title="Enter Your Character Description"):
             await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.", ephemeral=True)
 
 class EventView(discord.ui.View):
-    def __init__(self, message_id):
+    def __init__(self, message_id, max_participants):
         super().__init__(timeout=None)
         self.message_id = message_id
+        self.max_participants = max_participants
 
     @discord.ui.button(label="Join", style=discord.ButtonStyle.success)
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -118,8 +119,8 @@ class EventView(discord.ui.View):
             await interaction.response.send_message("You are on the waitlist. Use Leave to remove yourself first.", ephemeral=True)
             return
 
-        if len(accepted) < 7:
-            modal = JoinModal(self.message_id, user_id)
+        if len(accepted) < self.max_participants:
+            modal = JoinModal(self.message_id, user_id, self.max_participants)
             await interaction.response.send_modal(modal)
         else:
             await interaction.response.send_message("Sorry, the event is full. Use the Waitlist button to join the waitlist.", ephemeral=True)
@@ -162,6 +163,8 @@ class EventView(discord.ui.View):
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         signups = event_signups.get(self.message_id)
+        max_participants = signups.get("max_participants", 10)
+
         if not signups:
             await interaction.response.send_message("Event expired or not found.", ephemeral=True)
             return
@@ -189,7 +192,7 @@ class EventView(discord.ui.View):
             embed = message.embeds[0]
             embed.set_field_at(
                 1,
-                name=f"✅ Accepted ({len(accepted)}/7)",
+                name=f"✅ Accepted ({len(accepted)}/{max_participants})",
                 value=format_accepted(accepted),
                 inline=True
             )
@@ -210,45 +213,58 @@ allowed_user_ids = {284137393483939841, 261651766213345282}  # Replace with actu
 @app_commands.describe(
     title="Title of your event",
     description="Description for the event",
-    time="Date, time, and Google Calendar link for the event",
+    time="Date and time for the event in ISO 8601 format, e.g. 2025-08-11T18:30",
+    roles_to_ping="Roles to ping (mention them here)",
+    max_participants="Maximum number of participants allowed",
     image_url="Optional URL of an image to display below description"
 )
-async def event(interaction: discord.Interaction, title: str, description: str, time: str, image_url: str = None):
+async def event(
+    interaction: discord.Interaction,
+    title: str,
+    description: str,
+    time: str,
+    roles_to_ping: str,
+    max_participants: int,
+    image_url: str = None
+):
     if interaction.user.id not in allowed_user_ids:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
+
+    try:
+        parsed_time = parser.isoparse(time)
+    except Exception:
+        await interaction.response.send_message("Invalid time format. Use ISO8601 (YYYY-MM-DDTHH:MM:SS).", ephemeral=True)
+        return
+
+    embed_time_str = f"<t:{int(parsed_time.timestamp())}:F>"
+
     embed = discord.Embed(
         title=title,
         description=description,
         color=discord.Color.green()
     )
-    embed.add_field(
-        name="Time",
-        value=time,
-        inline=False
-    )
+    embed.add_field(name="Time", value=embed_time_str, inline=False)
     if image_url:
         embed.set_image(url=image_url)
-    embed.add_field(
-        name="✅ Accepted (0/7)",
-        value="No one yet.",
-        inline=True
-    )
-    embed.add_field(
-        name="🕒 Waitlist",
-        value="No one yet.",
-        inline=True
-    )
+    embed.add_field(name=f"✅ Accepted (0/{max_participants})", value="No one yet.", inline=True)
+    embed.add_field(name="🕒 Waitlist", value="No one yet.", inline=True)
     embed.set_footer(text=f"Created by {interaction.user.display_name}")
 
-    await interaction.response.send_message(embed=embed)
+    # Send the embed + role mentions
+    await interaction.response.send_message(
+        content=roles_to_ping,
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
+
     message = await interaction.original_response()
 
     # Initialize signup lists
-    event_signups[message.id] = {"accepted": {}, "waitlist": set()}
+    event_signups[message.id] = {"accepted": {}, "waitlist": set(), "max_participants": max_participants}
 
-    # Add buttons view with message id
-    view = EventView(message.id)
+    # Add buttons
+    view = EventView(message.id, max_participants)
     await message.edit(view=view)
 
 @bot.event

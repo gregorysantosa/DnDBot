@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from dateutil import parser
 import asyncio
 from datetime import datetime, timezone
+import json
+from discord import File
+from io import StringIO
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -26,6 +29,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # waitlist: set of user_ids
 # Also store event_time as datetime
 event_signups = {}
+
+vault = {}
 
 def format_accepted(accepted_dict):
     if not accepted_dict:
@@ -96,9 +101,9 @@ class JoinModal(discord.ui.Modal, title="Format: {Name} - {Lvl} {Class}"):
                 inline=True
             )
             await message.edit(embed=embed)
-            await interaction.response.send_message("You have joined the event!", ephemeral=True)
+            await interaction.response.send_message("You have joined the event!")
         else:
-            await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.", ephemeral=True)
+            await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.")
 
 class EventView(discord.ui.View):
     def __init__(self, message_id, max_participants):
@@ -162,7 +167,7 @@ class EventView(discord.ui.View):
         )
         await message.edit(embed=embed)
 
-        await interaction.response.send_message("You have been added to the waitlist.", ephemeral=True)
+        await interaction.response.send_message("You have been added to the waitlist.")
 
     @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger)
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -208,9 +213,9 @@ class EventView(discord.ui.View):
                 inline=True
             )
             await message.edit(embed=embed)
-            await interaction.response.send_message("You have left the event.", ephemeral=True)
+            await interaction.response.send_message("You have left the event.")
         else:
-            await interaction.response.send_message("You are not in the event or waitlist.", ephemeral=True)
+            await interaction.response.send_message("You are not in the event or waitlist.")
 
 allowed_user_ids = {284137393483939841, 261651766213345282}  # Replace with actual Discord user IDs
 
@@ -228,7 +233,6 @@ async def schedule_event_reminder(message_id: int):
     wait_seconds = reminder_time - now
 
     if wait_seconds <= 0:
-        # Event is soon or passed, skip or send immediately
         wait_seconds = 0
 
     await asyncio.sleep(wait_seconds)
@@ -237,26 +241,23 @@ async def schedule_event_reminder(message_id: int):
     channel = None
     message = None
 
-    # Try to find the message's channel and message
     for guild in bot.guilds:
         for channel_candidate in guild.text_channels:
             try:
                 message = await channel_candidate.fetch_message(message_id)
                 channel = channel_candidate
                 break
-            except discord.NotFound:
-                continue
-            except discord.Forbidden:
+            except (discord.NotFound, discord.Forbidden):
                 continue
         if message:
             break
 
     if not message or not channel:
-        return  # message not found or inaccessible
+        return
 
     accepted = signups.get("accepted", {})
     if not accepted:
-        return  # no participants to notify
+        return
 
     mentions = []
     for user_id in accepted.keys():
@@ -265,7 +266,7 @@ async def schedule_event_reminder(message_id: int):
             mentions.append(member.mention)
 
     if not mentions:
-        return  # no members to mention
+        return
 
     mention_text = " ".join(mentions)
     await channel.send(f"⏰ Reminder: The event **{message.embeds[0].title}** starts in 15 minutes! {mention_text}")
@@ -294,7 +295,6 @@ async def event(
 
     try:
         parsed_time = parser.isoparse(time)
-        # Ensure datetime is timezone aware UTC
         if parsed_time.tzinfo is None:
             parsed_time = parsed_time.replace(tzinfo=timezone.utc)
         else:
@@ -317,7 +317,6 @@ async def event(
     embed.add_field(name="🕒 Waitlist", value="No one yet.", inline=True)
     embed.set_footer(text=f"Created by {interaction.user.display_name}")
 
-    # Send the embed + role mentions
     await interaction.response.send_message(
         content=roles_to_ping,
         embed=embed,
@@ -326,7 +325,6 @@ async def event(
 
     message = await interaction.original_response()
 
-    # Initialize signup lists and store event time
     event_signups[message.id] = {
         "accepted": {},
         "waitlist": set(),
@@ -334,12 +332,242 @@ async def event(
         "event_time": parsed_time
     }
 
-    # Add buttons
     view = EventView(message.id, max_participants)
     await message.edit(view=view)
 
-    # Schedule the reminder task
     bot.loop.create_task(schedule_event_reminder(message.id))
+
+
+# ---- Vault commands ----
+
+# vault now stores list of dicts: {"description": str, "link": Optional[str]}
+vault = {}
+
+RARITY_CHOICES = [
+    app_commands.Choice(name="Common", value="Common"),
+    app_commands.Choice(name="Uncommon", value="Uncommon"),
+    app_commands.Choice(name="Rare", value="Rare"),
+    app_commands.Choice(name="Very Rare", value="Very Rare"),
+    app_commands.Choice(name="Legendary", value="Legendary"),
+    app_commands.Choice(name="Artifact", value="Artifact"),
+    app_commands.Choice(name="Unique", value="Unique"),
+    app_commands.Choice(name="???", value="???"),
+]
+
+RARITY_EMOJIS = {
+    "Common": "⚪",
+    "Uncommon": "🟢",
+    "Rare": "🔵",
+    "Very Rare": "🟣",
+    "Legendary": "🟡",
+    "Artifact": "🟠",
+    "Unique": "🟣",
+    "???": "⚫"
+}
+
+TYPES_CHOICES = [
+    app_commands.Choice(name="Armor", value="Armor"),
+    app_commands.Choice(name="Potions", value="Potions"),
+    app_commands.Choice(name="Rings", value="Rings"),
+    app_commands.Choice(name="Rods", value="Rods"),
+    app_commands.Choice(name="Scrolls", value="Scrolls"),
+    app_commands.Choice(name="Staffs", value="Staffs"),
+    app_commands.Choice(name="Wands", value="Wands"),
+    app_commands.Choice(name="Weapons", value="Weapons"),
+    app_commands.Choice(name="Wondrous items", value="Wondrous items"),
+]
+
+TYPE_EMOJIS = {
+    "Armor": "🛡️",
+    "Potions": "🧪",
+    "Rings": "💍",
+    "Rods": "✨",
+    "Scrolls": "📜",
+    "Staffs": "🔮",
+    "Wands": "🪄",
+    "Weapons": "⚔️",
+    "Wondrous items": "🎁",
+}
+# Vault items now include rarity, link, and description
+
+@bot.tree.command(name="additem", description="Add an item to a user's vault")
+@app_commands.describe(
+    user="User to add the item for",
+    description="Description of the item",
+    link="Optional link related to the item",
+    rarity="Rarity of the item",
+    types="Type of the item"
+)
+@app_commands.choices(rarity=RARITY_CHOICES, types=TYPES_CHOICES)
+async def additem(
+    interaction: discord.Interaction,
+    user: discord.User,
+    description: str,
+    rarity: app_commands.Choice[str],
+    types: app_commands.Choice[str],
+    link: str = None,
+):
+    if interaction.user.id not in allowed_user_ids:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    vault.setdefault(user.id, []).append({
+        "description": description,
+        "link": link,
+        "rarity": rarity.value if rarity else "Common",
+        "types": types.value if types else "Other"
+    })
+
+    embed = discord.Embed(
+        title="Item Added",
+        color=discord.Color.green()
+    )
+    embed.description = f"Added to **{user.display_name}**'s vault:\n• **{description}**"
+    embed.add_field(name="Rarity", value=f"{RARITY_EMOJIS.get(rarity.value, '')} {rarity.value}" if rarity else "Common", inline=True)
+    embed.add_field(name="Type", value=f"{TYPE_EMOJIS.get(types.value, '')} {types.value}" if types else "Other", inline=True)
+    if link:
+        embed.add_field(name="Link", value=f"[Click Here]({link})", inline=True)
+
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="removeitem", description="Remove an item from a user's vault")
+@app_commands.describe(
+    user="User to remove the item from",
+    description="Description of the item to remove",
+    link="Optional link related to the item",
+    rarity="Rarity of the item",
+    types="Type of the item"
+)
+@app_commands.choices(rarity=RARITY_CHOICES, types=TYPES_CHOICES)
+async def removeitem(
+    interaction: discord.Interaction,
+    user: discord.User,
+    description: str,
+    rarity: app_commands.Choice[str],
+    types: app_commands.Choice[str],
+    link: str = None,
+):
+    if interaction.user.id not in allowed_user_ids:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    items = vault.get(user.id, [])
+    embed = discord.Embed(color=discord.Color.red())
+    target_rarity = rarity.value if rarity else "Common"
+    target_type = types.value if types else "Other"
+    found = False
+    for i, item in enumerate(items):
+        if (item.get("description") == description
+            and (link is None or item.get("link") == link)
+            and item.get("rarity", "Common") == target_rarity
+            and item.get("types", "Other") == target_type):
+            del items[i]
+            found = True
+            break
+
+    if found:
+        embed.title = "Item Removed"
+        embed.description = f"Removed from **{user.display_name}**'s vault:\n• **{description}**"
+        embed.add_field(name="Rarity", value=f"{RARITY_EMOJIS.get(target_rarity, '')} {target_rarity}", inline=True)
+        embed.add_field(name="Type", value=f"{TYPE_EMOJIS.get(target_type, '')} {target_type}", inline=True)
+        if link:
+            embed.add_field(name="Link", value=f"[Click Here]({link})", inline=True)
+    else:
+        embed.title = "Item Not Found"
+        embed.description = (
+            f"Could not find **{description}** with rarity **{target_rarity}** and type **{target_type}** in **{user.display_name}**'s vault."
+        )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="showvault", description="Show items in a user's vault")
+@app_commands.describe(user="User whose vault to show")
+async def showvault(interaction: discord.Interaction, user: discord.User):
+    items = vault.get(user.id, [])
+    embed = discord.Embed(
+        title=f"{user.display_name}'s Vault",
+        color=discord.Color.blue()
+    )
+    if not items:
+        embed.description = "No items in the vault."
+    else:
+        lines = []
+        for item in items:
+            desc = item.get("description")
+            link = item.get("link")
+            rarity = f"{RARITY_EMOJIS.get(item.get("rarity", "Common"), '')} {item.get("rarity", "Common")}"
+            types = f"{TYPE_EMOJIS.get(item.get("types", "Other"), '')} {item.get("types", "Other")}" 
+            line = f"• **{desc}** — *{rarity}* — _{types}_\n"
+            if link:
+                line += f" ([link]({link}))"
+            lines.append(line)
+        embed.description = "\n".join(lines)
+
+    embed.set_image(url="https://geekdad.com/wp-content/uploads/2023/05/dm-vault1.jpg")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="exportvault", description="Export the entire vault data as a JSON file")
+async def exportvault(interaction: discord.Interaction):
+    if interaction.user.id not in allowed_user_ids:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    # Serialize vault dictionary to JSON string
+    vault_json = json.dumps(vault, indent=4)
+    
+    # Use StringIO to create a file-like object from the JSON string
+    file_obj = StringIO(vault_json)
+    file_obj.seek(0)
+    
+    # Send as a file attachment
+    await interaction.response.send_message(
+        content="Here is the exported vault data.",
+        file=File(fp=file_obj, filename="vault_export.json"),
+        ephemeral=True
+    )
+
+@bot.tree.command(name="importvault", description="Import vault data from a JSON string")
+@app_commands.describe(json_data="JSON string representing the vault data")
+async def importvault(interaction: discord.Interaction, json_data: str):
+    if interaction.user.id not in allowed_user_ids:
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    
+    try:
+        # Parse the input JSON string
+        new_vault = json.loads(json_data)
+        
+        # Optionally validate structure here before replacing
+        if not isinstance(new_vault, dict):
+            raise ValueError("Data must be a dictionary.")
+        
+        # You might want to do more deep validation of values here
+        
+        # Replace the vault data
+        global vault
+        vault = new_vault
+        
+        await interaction.response.send_message("Vault data imported successfully.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to import vault: {e}", ephemeral=True)
+
+# ---- Help command ----
+@bot.tree.command(name="help", description="Show list of all commands and their descriptions")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Bot Commands Help",
+        color=discord.Color.blurple()
+    )
+
+    # Get all commands in the tree for the current guild or global
+    commands_list = bot.tree.get_commands(guild=discord.Object(id=GUILD_ID))
+
+    for cmd in commands_list:
+        embed.add_field(name=f"/{cmd.name}", value=cmd.description or "No description", inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ---- events and error ----
 
 @bot.event
 async def on_ready():

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 from discord import File
 from io import StringIO
+import pytz
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -271,11 +272,13 @@ async def schedule_event_reminder(message_id: int):
     mention_text = " ".join(mentions)
     await channel.send(f"⏰ Reminder: The event **{message.embeds[0].title}** starts in 15 minutes! {mention_text}")
 
+PST = pytz.timezone("America/Los_Angeles")
+
 @bot.tree.command(name="event", description="Create a custom event embed")
 @app_commands.describe(
     title="Title of your event",
     description="Description for the event",
-    time="Date and time for the event in ISO 8601 format, YYYY-MM-DDTHH:MM:SS-7:00",
+    time="Date and time for the event in ISO 8601 format, YYYY-MM-DDTHH:MM:SS",
     roles_to_ping="Roles to ping (mention them here)",
     max_participants="Maximum number of participants allowed",
     image_url="Optional URL of an image to display below description"
@@ -296,14 +299,21 @@ async def event(
     try:
         parsed_time = parser.isoparse(time)
         if parsed_time.tzinfo is None:
-            parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+            # Assume PST if no timezone info given
+            parsed_time = PST.localize(parsed_time)
         else:
-            parsed_time = parsed_time.astimezone(timezone.utc)
+            # Convert any provided time to PST
+            parsed_time = parsed_time.astimezone(PST)
+        # Convert PST to UTC for Discord timestamp
+        utc_time = parsed_time.astimezone(timezone.utc)
     except Exception:
-        await interaction.response.send_message("Invalid time format. Use ISO8601 (YYYY-MM-DDTHH:MM:SS).", ephemeral=True)
+        await interaction.response.send_message(
+            "Invalid time format. Use ISO8601 (YYYY-MM-DDTHH:MM:SS).",
+            ephemeral=True
+        )
         return
 
-    embed_time_str = f"<t:{int(parsed_time.timestamp())}:F>"
+    embed_time_str = f"<t:{int(utc_time.timestamp())}:F>"
 
     embed = discord.Embed(
         title=title,
@@ -329,7 +339,7 @@ async def event(
         "accepted": {},
         "waitlist": set(),
         "max_participants": max_participants,
-        "event_time": parsed_time
+        "event_time": utc_time
     }
 
     view = EventView(message.id, max_participants)
@@ -374,7 +384,7 @@ TYPES_CHOICES = [
     app_commands.Choice(name="Staffs", value="Staffs"),
     app_commands.Choice(name="Wands", value="Wands"),
     app_commands.Choice(name="Weapons", value="Weapons"),
-    app_commands.Choice(name="Wondrous items", value="Wondrous items"),
+    app_commands.Choice(name="Wondrous Item", value="Wondrous Item"),
 ]
 
 TYPE_EMOJIS = {
@@ -386,7 +396,7 @@ TYPE_EMOJIS = {
     "Staffs": "🔮",
     "Wands": "🪄",
     "Weapons": "⚔️",
-    "Wondrous items": "🎁",
+    "Wondrous Item": "🎁",
 }
 # Vault items now include rarity, link, and description
 
@@ -479,15 +489,19 @@ async def removeitem(
         )
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="showvault", description="Show your vault or another user's vault")
+@app_commands.describe(user="User whose vault to show (optional)")
+async def showvault(interaction: discord.Interaction, user: discord.User = None):
+    if user is None:
+        user = interaction.user  # Default to the caller
 
-@bot.tree.command(name="showvault", description="Show items in a user's vault")
-@app_commands.describe(user="User whose vault to show")
-async def showvault(interaction: discord.Interaction, user: discord.User):
     items = vault.get(user.id, [])
+
     embed = discord.Embed(
         title=f"{user.display_name}'s Vault",
         color=discord.Color.blue()
     )
+
     if not items:
         embed.description = "No items in the vault."
     else:
@@ -495,15 +509,16 @@ async def showvault(interaction: discord.Interaction, user: discord.User):
         for item in items:
             desc = item.get("description")
             link = item.get("link")
-            rarity = f"{RARITY_EMOJIS.get(item.get("rarity", "Common"), '')} {item.get("rarity", "Common")}"
-            types = f"{TYPE_EMOJIS.get(item.get("types", "Other"), '')} {item.get("types", "Other")}" 
-            line = f"• **{desc}** — *{rarity}* — _{types}_\n"
+            rarity = f"{RARITY_EMOJIS.get(item.get('rarity', 'Common'), '')} {item.get('rarity', 'Common')}"
+            types = f"{TYPE_EMOJIS.get(item.get('types', 'Other'), '')} {item.get('types', 'Other')}"
+            line = f"• **{desc}** — *{rarity}* — _{types}_"
             if link:
                 line += f" ([link]({link}))"
             lines.append(line)
-        embed.description = "\n".join(lines)
 
-    embed.set_image(url="https://geekdad.com/wp-content/uploads/2023/05/dm-vault1.jpg")
+        embed.description = "\n\n".join(lines)  # Extra spacing between items
+
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1404353825573441546/1404994722925121636/Party_Inventory.jpg?ex=689d36cd&is=689be54d&hm=70c56a91815ce92ac5f8345b21b2ba050852bf26c22ff76bec198bb7a9528c6a&")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="exportvault", description="Export the entire vault data as a JSON file")

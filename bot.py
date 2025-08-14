@@ -10,6 +10,8 @@ import json
 from discord import File
 from io import StringIO
 import pytz
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -852,4 +854,19 @@ async def on_ready():
 async def on_app_command_error(interaction: discord.Interaction, error):
     await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
+
+# Minimal HTTP server to keep Render happy
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('', port), Handler)
+    server.serve_forever()
+
+# Start bot and HTTP server in parallel
+Thread(target=run_server).start()
 bot.run(TOKEN)

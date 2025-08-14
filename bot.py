@@ -13,6 +13,7 @@ import pytz
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 import time
+import traceback
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -881,5 +882,6 @@ while True:
         break  # only exits loop if bot.run finishes cleanly
     except Exception as e:
         print(f"Bot crashed: {e}. Retrying in {retry_delay} seconds...")
+        traceback.print_exc()  # shows full stack trace
         time.sleep(retry_delay)
         retry_delay = min(retry_delay * 2, 60)  # exponential backoff up to 60s

@@ -863,6 +863,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running!")
+
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
@@ -872,16 +873,22 @@ def run_server():
     server = HTTPServer(('', port), Handler)
     server.serve_forever()
 
-# Minimal HTTP server (your HEAD/GET fix is fine)
 Thread(target=run_server).start()
 
-retry_delay = 5  # start small
+# Retry loop
 while True:
     try:
+        # Create a new bot instance each time
+        intents = discord.Intents.default()
+        bot = discord.Client(intents=intents)
+
+        @bot.event
+        async def on_ready():
+            print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
         bot.run(TOKEN)
-        break  # only exits loop if bot.run finishes cleanly
-    except Exception as e:
-        print(f"Bot crashed: {e}. Retrying in {retry_delay} seconds...")
-        traceback.print_exc()  # shows full stack trace
-        time.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 60)  # exponential backoff up to 60s
+
+    except Exception:
+        print("Bot crashed!")
+        traceback.print_exc()
+        time.sleep(15)

@@ -12,6 +12,7 @@ from io import StringIO
 import pytz
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
+import time
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -855,7 +856,7 @@ async def on_app_command_error(interaction: discord.Interaction, error):
     await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
 
-# Minimal HTTP server to keep Render happy
+# Minimal HTTP server
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -867,6 +868,13 @@ def run_server():
     server = HTTPServer(('', port), Handler)
     server.serve_forever()
 
-# Start bot and HTTP server in parallel
+# Start HTTP server in background
 Thread(target=run_server).start()
-bot.run(TOKEN)
+
+# Retry loop for bot
+while True:
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"Bot crashed: {e}. Restarting in 15 seconds...")
+        time.sleep(15)

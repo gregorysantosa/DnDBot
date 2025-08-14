@@ -53,9 +53,10 @@ def format_waitlist(waitlist_set):
         lines.append(name)
     return "\n".join(lines)
 
-class JoinModal(discord.ui.Modal, title="Format: {Name} - {Lvl} {Class}"):
-    def __init__(self, message_id, user_id, max_participants):
-        super().__init__()
+class JoinModal(discord.ui.Modal):
+    def __init__(self, message_id, user_id, max_participants, event_title):
+        super().__init__(title=f"{event_title}")
+
         self.message_id = message_id
         self.user_id = user_id
         self.max_participants = max_participants
@@ -63,7 +64,7 @@ class JoinModal(discord.ui.Modal, title="Format: {Name} - {Lvl} {Class}"):
     character_desc = discord.ui.TextInput(
         label="Character Description",
         style=discord.TextStyle.paragraph,
-        placeholder="Enter your character name, class, or details here",
+        placeholder="Ex: {Name} - {Lvl} {Class}",
         required=True,
         max_length=200,
     )
@@ -102,15 +103,17 @@ class JoinModal(discord.ui.Modal, title="Format: {Name} - {Lvl} {Class}"):
                 inline=True
             )
             await message.edit(embed=embed)
-            await interaction.response.send_message("You have joined the event!")
+            await interaction.response.send_message("You have joined the event!", ephemeral=True)
         else:
-            await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.")
+            await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.", ephemeral=True)
+
 
 class EventView(discord.ui.View):
-    def __init__(self, message_id, max_participants):
+    def __init__(self, message_id, max_participants, title):
         super().__init__(timeout=None)
         self.message_id = message_id
         self.max_participants = max_participants
+        self.title = title
 
     @discord.ui.button(label="Join", style=discord.ButtonStyle.success)
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -131,7 +134,12 @@ class EventView(discord.ui.View):
             return
 
         if len(accepted) < self.max_participants:
-            modal = JoinModal(self.message_id, user_id, self.max_participants)
+            # Get event title from the embed
+            channel = bot.get_channel(interaction.channel_id)
+            message = await channel.fetch_message(self.message_id)
+            event_title = message.embeds[0].title if message.embeds else "Event"
+
+            modal = JoinModal(self.message_id, user_id, self.max_participants, event_title)
             await interaction.response.send_modal(modal)
         else:
             await interaction.response.send_message("Sorry, the event is full. Use the Waitlist button to join the waitlist.", ephemeral=True)
@@ -168,7 +176,7 @@ class EventView(discord.ui.View):
         )
         await message.edit(embed=embed)
 
-        await interaction.response.send_message("You have been added to the waitlist.")
+        await interaction.response.send_message("You have been added to the waitlist.", ephemeral=True)
 
     @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger)
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -214,10 +222,86 @@ class EventView(discord.ui.View):
                 inline=True
             )
             await message.edit(embed=embed)
-            await interaction.response.send_message("You have left the event.")
+            await interaction.response.send_message("You have left the event.", ephemeral=True)
         else:
-            await interaction.response.send_message("You are not in the event or waitlist.")
+            await interaction.response.send_message("You are not in the event or waitlist.", ephemeral=True)
 
+    @discord.ui.button(label="🔚", style=discord.ButtonStyle.secondary)
+    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only event creator can finish
+        if interaction.user.id not in allowed_user_ids:
+            await interaction.response.send_message("You cannot finish this adventure.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(FinishAdventureModal(self))
+
+    async def update_message(self, interaction: discord.Interaction):
+        data = event_signups[self.message_id]
+        embed = interaction.message.embeds[0]
+
+        accepted_list = "\n".join(data["accepted"].values()) if data["accepted"] else "No one yet."
+        waitlist_list = "\n".join(data["waitlist"]) if data["waitlist"] else "No one yet."
+
+        embed.set_field_at(1, name=f"✅ Accepted ({len(data['accepted'])}/{self.max_participants})", value=accepted_list, inline=True)
+        embed.set_field_at(2, name="🕒 Waitlist", value=waitlist_list, inline=True)
+
+        await interaction.message.edit(embed=embed, view=self)
+
+
+class FinishAdventureModal(discord.ui.Modal, title="Finish Adventure"):
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self.description_input = discord.ui.TextInput(
+            label="Adventure Summary",
+            style=discord.TextStyle.paragraph,
+            placeholder="What happened during the adventure?",
+            required=False
+        )
+        self.add_item(self.description_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        message_data = event_signups.get(self.view.message_id)
+        if not message_data:
+            await interaction.response.send_message("Event data not found.", ephemeral=True)
+            return
+
+        accepted_players = list(message_data["accepted"].values())
+        if not accepted_players:
+            players_list = "No players joined this adventure."
+        else:
+            players_list = "\n".join(f"• {player}" for player in accepted_players)
+
+        finish_embed = discord.Embed(
+            title=f"🏆 Adventure Finished: {self.view.title}",
+            description=f"**Adventurers:**\n{players_list}\n\n**Summary:**\n{self.description_input.value or 'No story provided.'}",
+            color=discord.Color.gold()
+        )
+        finish_embed.set_footer(text=f"Event ended by {interaction.user.display_name}")
+
+        await interaction.channel.send(embed=finish_embed)
+
+        # Save to history
+        event_history[self.view.message_id] = {
+            "title": self.view.title,
+            "players": accepted_players,
+            "summary": self.description_input.value or "No story provided.",
+            "ended_by": interaction.user.display_name
+        }
+
+        # Disable all buttons
+        for child in self.view.children:
+            child.disabled = True
+        await self.view.message.edit(view=self.view)
+
+        # Remove from active events
+        event_signups.pop(self.view.message_id, None)
+
+        await interaction.response.send_message("Adventure finished and archived!", ephemeral=True)
+
+# Event tracking
+event_signups = {}
+event_history = {}  # Stores finished events
 allowed_user_ids = {284137393483939841, 261651766213345282}  # Replace with actual Discord user IDs
 
 async def schedule_event_reminder(message_id: int):
@@ -229,48 +313,53 @@ async def schedule_event_reminder(message_id: int):
     if not event_time:
         return
 
-    reminder_time = event_time.timestamp() - 15*60  # 15 minutes before event start (in seconds)
+    reminders = [
+        (48 * 60 * 60, "48 hours"),
+        (12 * 60 * 60, "12 hours")
+    ]
+
     now = datetime.now(timezone.utc).timestamp()
-    wait_seconds = reminder_time - now
 
-    if wait_seconds <= 0:
-        wait_seconds = 0
+    for seconds_before, label in reminders:
+        reminder_time = event_time.timestamp() - seconds_before
+        wait_seconds = reminder_time - now
 
-    await asyncio.sleep(wait_seconds)
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
 
-    # After waiting, send reminder message
-    channel = None
-    message = None
+            # After waiting, send reminder message
+            channel = None
+            message = None
 
-    for guild in bot.guilds:
-        for channel_candidate in guild.text_channels:
-            try:
-                message = await channel_candidate.fetch_message(message_id)
-                channel = channel_candidate
-                break
-            except (discord.NotFound, discord.Forbidden):
-                continue
-        if message:
-            break
+            for guild in bot.guilds:
+                for channel_candidate in guild.text_channels:
+                    try:
+                        message = await channel_candidate.fetch_message(message_id)
+                        channel = channel_candidate
+                        break
+                    except (discord.NotFound, discord.Forbidden):
+                        continue
+                if message:
+                    break
 
-    if not message or not channel:
-        return
+            if not message or not channel:
+                return
 
-    accepted = signups.get("accepted", {})
-    if not accepted:
-        return
+            accepted = signups.get("accepted", {})
+            if not accepted:
+                return
 
-    mentions = []
-    for user_id in accepted.keys():
-        member = channel.guild.get_member(user_id)
-        if member:
-            mentions.append(member.mention)
+            mentions = []
+            for user_id in accepted.keys():
+                member = channel.guild.get_member(user_id)
+                if member:
+                    mentions.append(member.mention)
 
-    if not mentions:
-        return
-
-    mention_text = " ".join(mentions)
-    await channel.send(f"⏰ Reminder: The event **{message.embeds[0].title}** starts in 15 minutes! {mention_text}")
+            if mentions:
+                mention_text = " ".join(mentions)
+                await channel.send(
+                    f"⏰ Reminder: The event **{message.embeds[0].title}** starts in {label}! {mention_text}"
+                )
 
 PST = pytz.timezone("America/Los_Angeles")
 
@@ -299,12 +388,9 @@ async def event(
     try:
         parsed_time = parser.isoparse(time)
         if parsed_time.tzinfo is None:
-            # Assume PST if no timezone info given
             parsed_time = PST.localize(parsed_time)
         else:
-            # Convert any provided time to PST
             parsed_time = parsed_time.astimezone(PST)
-        # Convert PST to UTC for Discord timestamp
         utc_time = parsed_time.astimezone(timezone.utc)
     except Exception:
         await interaction.response.send_message(
@@ -339,14 +425,13 @@ async def event(
         "accepted": {},
         "waitlist": set(),
         "max_participants": max_participants,
-        "event_time": utc_time
+        "event_time": utc_time,
+        "title": title
     }
 
-    view = EventView(message.id, max_participants)
+    view = EventView(message.id, max_participants, title)
+    view.message = message  # Store reference to original message
     await message.edit(view=view)
-
-    bot.loop.create_task(schedule_event_reminder(message.id))
-
 
 # ---- Vault commands ----
 
@@ -362,6 +447,7 @@ RARITY_CHOICES = [
     app_commands.Choice(name="Artifact", value="Artifact"),
     app_commands.Choice(name="Unique", value="Unique"),
     app_commands.Choice(name="???", value="???"),
+    app_commands.Choice(name="Currency", value="Currency")
 ]
 
 RARITY_EMOJIS = {
@@ -372,7 +458,8 @@ RARITY_EMOJIS = {
     "Legendary": "🟡",
     "Artifact": "🟠",
     "Unique": "🟣",
-    "???": "⚫"
+    "???": "⚫",
+    "Currency": "🟡"
 }
 
 TYPES_CHOICES = [
@@ -385,6 +472,10 @@ TYPES_CHOICES = [
     app_commands.Choice(name="Wands", value="Wands"),
     app_commands.Choice(name="Weapons", value="Weapons"),
     app_commands.Choice(name="Wondrous Item", value="Wondrous Item"),
+    app_commands.Choice(name="cp", value="cp"),
+    app_commands.Choice(name="sp", value="sp"),
+    app_commands.Choice(name="gp", value="gp"),
+    app_commands.Choice(name="pp", value="pp"),
 ]
 
 TYPE_EMOJIS = {
@@ -397,6 +488,10 @@ TYPE_EMOJIS = {
     "Wands": "🪄",
     "Weapons": "⚔️",
     "Wondrous Item": "🎁",
+    "cp": "💲",
+    "sp": "💲",
+    "gp": "💲",
+    "pp": "💲",
 }
 # Vault items now include rarity, link, and description
 
@@ -541,30 +636,192 @@ async def exportvault(interaction: discord.Interaction):
         ephemeral=True
     )
 
-@bot.tree.command(name="importvault", description="Import vault data from a JSON string")
-@app_commands.describe(json_data="JSON string representing the vault data")
-async def importvault(interaction: discord.Interaction, json_data: str):
+@bot.tree.command(name="importvaultfile", description="Import vault from uploaded JSON file")
+async def importvaultfile(interaction: discord.Interaction, file: discord.Attachment):
     if interaction.user.id not in allowed_user_ids:
-        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
     
     try:
-        # Parse the input JSON string
-        new_vault = json.loads(json_data)
-        
-        # Optionally validate structure here before replacing
+        content = await file.read()
+        new_vault = json.loads(content.decode())
         if not isinstance(new_vault, dict):
-            raise ValueError("Data must be a dictionary.")
-        
-        # You might want to do more deep validation of values here
-        
-        # Replace the vault data
-        global vault
-        vault = new_vault
-        
-        await interaction.response.send_message("Vault data imported successfully.", ephemeral=True)
+            raise ValueError("Invalid format")
+
+        vault.clear()
+        vault.update({int(k): v for k, v in new_vault.items()})
+        await interaction.response.send_message("Vault imported successfully!", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"Failed to import vault: {e}", ephemeral=True)
+        await interaction.response.send_message(f"Error importing: {e}", ephemeral=True)
+
+
+trade_interest_messages = {}  # key: message_id (interest msg) -> dict with original_poster_id, interested_user_id, trade_post_id
+trade_sessions = {}  # key: trade_interest_message_id -> original_tradepost_message_id
+
+@bot.tree.command(name="tradepost", description="Put one of your vault items up for trade")
+@app_commands.describe(
+    item_description="Description (or part) of the item you want to trade",
+    wanted_description="What you want in exchange for this item"
+)
+async def tradepost(interaction: discord.Interaction, item_description: str, wanted_description: str):
+    user_id = interaction.user.id
+    user_items = vault.get(user_id, [])
+
+    matched_item = None
+    for item in user_items:
+        if item_description.lower() in item.get("description", "").lower():
+            matched_item = item
+            break
+
+    if not matched_item:
+        await interaction.response.send_message(
+            f"No item found in your vault matching '{item_description}'.", ephemeral=True
+        )
+        return
+
+    rarity = matched_item.get("rarity", "Common")
+    types = matched_item.get("types", "Other")
+    desc = matched_item.get("description", "No description")
+    link = matched_item.get("link")
+
+    embed = discord.Embed(
+        title="Item For Trade",
+        color=discord.Color.gold()
+    )
+    embed.description = f"**{desc}**"
+    embed.add_field(name="Rarity", value=f"{RARITY_EMOJIS.get(rarity, '')} {rarity}", inline=True)
+    embed.add_field(name="Type", value=f"{TYPE_EMOJIS.get(types, '')} {types}", inline=True)
+    embed.add_field(name="Wanted In Exchange", value=wanted_description, inline=False)
+    if link:
+        embed.add_field(name="Link", value=f"[Click Here]({link})", inline=True)
+
+    embed.set_footer(text=f"Posted for trade by {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    await message.add_reaction("🙋")  # Reaction to show interest
+
+    # Save who posted this trade for reaction validation later
+    trade_interest_messages[message.id] = user_id
+    # Note: You do not have a response attribute on message, just store with message.id
+    # You will map interest messages to this original tradepost message in on_reaction_add
+
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+
+    message = reaction.message
+    emoji = reaction.emoji
+
+    # Interest reaction on trade post message
+    if emoji == "🙋" and message.embeds:
+        embed_title = message.embeds[0].title
+
+        if embed_title == "Item For Trade":
+            # Someone is interested in trade, create a reply message with ✅ react
+            interested_embed = discord.Embed(
+                title="Trade Interest",
+                description=(
+                    f"**{user.display_name}** is interested in this trade!\n\n"
+                    "Original poster, react ✅ to this message to accept the trade."
+                ),
+                color=discord.Color.green()
+            )
+            interested_embed.set_footer(text=f"React to accept trade. Trade Post ID: {message.id}")
+
+            interest_message = await message.reply(embed=interested_embed)
+            await interest_message.add_reaction("✅")
+
+            original_poster_id = trade_interest_messages.get(message.id)
+            trade_interest_messages[interest_message.id] = {
+                "original_poster_id": original_poster_id,
+                "interested_user_id": user.id,
+                "trade_post_id": message.id
+            }
+            # Map interest message id to original tradepost message id for future reference
+            trade_sessions[interest_message.id] = message.id
+
+    # Accept trade reaction on interest message
+    elif emoji == "✅" and message.embeds:
+        embed_title = message.embeds[0].title
+
+        if embed_title == "Trade Interest":
+            data = trade_interest_messages.get(message.id)
+            if data is None:
+                return
+
+            original_poster_id = data["original_poster_id"]
+
+            # Only original poster can accept trade here
+            if user.id == original_poster_id:
+                guild = message.guild
+                original_member = guild.get_member(original_poster_id)
+                interested_member = guild.get_member(data["interested_user_id"])
+
+                accepted_embed = discord.Embed(
+                    title="Trade Accepted ✅",
+                    description=(
+                        f"Trade accepted by **{original_member.display_name if original_member else 'Original Poster'}** "
+                        f"and **{interested_member.display_name if interested_member else 'Interested User'}**!\n"
+                        f"An admin will shortly complete the trade transaction."
+                    ),
+                    color=discord.Color.gold()
+                )
+                accepted_embed.set_footer(text=f"Trade post ID: {data['trade_post_id']}")
+
+                await message.edit(embed=accepted_embed)
+                await message.clear_reactions()
+                await message.add_reaction("📦")  # Reaction for transaction complete
+
+    # Transaction complete reaction by admin
+    elif emoji == "📦" and message.embeds:
+        embed_title = message.embeds[0].title
+
+        if embed_title == "Trade Accepted ✅":
+            if user.id not in allowed_user_ids:
+                return  # Unauthorized user; ignore
+
+            # Lookup original TradePost embed message ID
+            original_msg_id = trade_sessions.get(message.id)
+            if not original_msg_id:
+                return
+
+            # Fetch the channel and original message object
+            channel = message.channel
+            original_msg = await channel.fetch_message(original_msg_id)
+
+            # Remove 📦 reaction from the original TradePost embed message to disable it
+            await original_msg.clear_reaction("🙋")
+
+            # Remove the 📦 reaction from the Trade Accepted message to disable it
+            await message.clear_reaction(emoji)
+
+            # Find the two traders from trade_interest_messages mapping
+            traders = trade_interest_messages.get(message.id)
+
+            if traders:
+                guild = message.guild
+                original_member = guild.get_member(traders["original_poster_id"])
+                interested_member = guild.get_member(traders["interested_user_id"])
+
+                mentions = []
+                if original_member:
+                    mentions.append(original_member.mention)
+                if interested_member:
+                    mentions.append(interested_member.mention)
+
+                mention_text = " ".join(mentions) if mentions else ""
+
+                await message.channel.send(
+                    content=f"✅ Transaction has been completed by **{user.display_name}**! {mention_text}",
+                    reference=message.to_reference(fail_if_not_exists=False)
+                )
+
+                # Optionally clean up tracking data here
+                del trade_interest_messages[message.id]
+                del trade_sessions[message.id]
+
 
 # ---- Help command ----
 @bot.tree.command(name="help", description="Show list of all commands and their descriptions")

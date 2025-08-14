@@ -871,13 +871,15 @@ def run_server():
     server = HTTPServer(('', port), Handler)
     server.serve_forever()
 
-# Start HTTP server in background
+# Minimal HTTP server (your HEAD/GET fix is fine)
 Thread(target=run_server).start()
 
-# Retry loop for bot
+retry_delay = 5  # start small
 while True:
     try:
         bot.run(TOKEN)
+        break  # only exits loop if bot.run finishes cleanly
     except Exception as e:
-        print(f"Bot crashed: {e}. Restarting in 15 seconds...")
-        time.sleep(15)
+        print(f"Bot crashed: {e}. Retrying in {retry_delay} seconds...")
+        time.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 60)  # exponential backoff up to 60s

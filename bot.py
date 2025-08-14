@@ -856,23 +856,28 @@ async def on_app_command_error(interaction: discord.Interaction, error):
     await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
 
-# # Minimal HTTP server
-# class Handler(BaseHTTPRequestHandler):
-#     def do_GET(self):
-#         self.send_response(200)
-#         self.end_headers()
-#         self.wfile.write(b"Bot is running!")
-#     def do_HEAD(self):
-#         self.send_response(200)
-#         self.end_headers()
+# Minimal HTTP server
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
-# def run_server():
-#     port = int(os.environ.get("PORT", 10000))
-#     server = HTTPServer(('', port), Handler)
-#     server.serve_forever()
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('', port), Handler)
+    server.serve_forever()
 
 # Start HTTP server in background
-#Thread(target=run_server).start()
+Thread(target=run_server).start()
 
 # Retry loop for bot
-bot.run(TOKEN)
+while True:
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"Bot crashed: {e}. Restarting in 15 seconds...")
+        time.sleep(15)

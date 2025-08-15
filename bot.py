@@ -878,14 +878,6 @@ Thread(target=run_server).start()
 # Retry loop
 while True:
     try:
-        # Create a new bot instance each time
-        intents = discord.Intents.default()
-        bot = discord.Client(intents=intents)
-
-        @bot.event
-        async def on_ready():
-            print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-
         bot.run(TOKEN)
 
     except Exception:

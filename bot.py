@@ -21,13 +21,9 @@ GUILD_ID = 856322099239845919
 # 856322099239845919 <- DnD
 # 1402852211083448380 <- Dev
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.reactions = True
-intents.guilds = True
-intents.members = True  # Needed for member info
+# intents = discord.Intents.default()
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Store signups keyed by message ID
 # accepted: dict user_id -> character description (str)
@@ -875,12 +871,31 @@ def run_server():
 
 Thread(target=run_server).start()
 
-# Retry loop
-while True:
-    try:
-        bot.run(TOKEN)
+# ======= Bot logic wrapped in a function =======
+def run_bot():
+    intents = discord.Intents.default()
+    intents.message_content = True  # Enable message content for text commands
+    intents.reactions = True
+    intents.guilds = True
+    intents.members = True  # Needed for member info
+    bot = commands.Bot(command_prefix="!", intents=intents)
 
-    except Exception:
-        print("Bot crashed!")
-        traceback.print_exc()
-        time.sleep(15)
+    # Example command
+    @bot.command()
+    async def ping(ctx):
+        await ctx.send("Pong!")
+
+    @bot.event
+    async def on_ready():
+        print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+
+    asyncio.run(bot.start(TOKEN))
+
+# ======= Restart loop =======
+if __name__ == "__main__":
+    while True:
+        try:
+            run_bot()
+        except Exception as e:
+            print(f"❌ Bot crashed: {e}")
+            time.sleep(5)  # wait before restart

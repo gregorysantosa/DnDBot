@@ -35,7 +35,83 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Also store event_time as datetime
 event_signups = {}
 
+EVENTS_FILE = "events.json"
+
+def save_events():
+    def convert(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()  # Convert datetime to string
+        return obj
+
+    with open(EVENTS_FILE, "w") as f:
+        json.dump(
+            {
+                k: {
+                    **v,
+                    # 🔧 make sure keys are saved as strings
+                    "accepted": {str(uid): desc for uid, desc in v.get("accepted", {}).items()},
+                    "waitlist": list(v.get("waitlist", []))
+                }
+                for k, v in event_signups.items()
+            },
+            f,
+            indent=4,
+            default=convert
+        )
+
+
+def load_events():
+    global event_signups
+    try:
+        with open(EVENTS_FILE, "r") as f:
+            data = json.load(f)
+            event_signups = {}
+            for k, v in data.items():
+                eid = int(k)
+
+                # Normalize waitlist
+                waitlist = v.get("waitlist", [])
+                if isinstance(waitlist, str):
+                    waitlist = {int(waitlist)}
+                elif isinstance(waitlist, list):
+                    waitlist = {int(x) for x in waitlist}
+                elif isinstance(waitlist, set):
+                    waitlist = waitlist
+                else:
+                    waitlist = set()
+
+                # 🔧 Normalize accepted dict keys back to int
+                accepted = {int(uid): desc for uid, desc in v.get("accepted", {}).items()}
+
+                event_signups[eid] = {
+                    **v,
+                    "waitlist": waitlist,
+                    "accepted": accepted
+                }
+    except (FileNotFoundError, json.JSONDecodeError):
+        event_signups = {}
+
+
 vault = {}
+
+VAULT_FILE = "vault.json"
+
+def save_vault():
+    """Save the vault to disk."""
+    with open(VAULT_FILE, "w") as f:
+        json.dump(vault, f, indent=4)
+
+
+def load_vault():
+    """Load the vault from disk."""
+    global vault
+    try:
+        with open(VAULT_FILE, "r") as f:
+            data = json.load(f)
+            # Ensure keys are ints
+            vault = {int(k): v for k, v in data.items()}
+    except (FileNotFoundError, json.JSONDecodeError):
+        vault = {}
 
 def format_accepted(accepted_dict):
     if not accepted_dict:
@@ -110,6 +186,7 @@ class JoinModal(discord.ui.Modal):
             await interaction.response.send_message("You have joined the event!", ephemeral=True)
         else:
             await interaction.response.send_message("Sorry, event is full. Use Waitlist button to join waitlist.", ephemeral=True)
+        save_events()
 
 
 class EventView(discord.ui.View):
@@ -119,7 +196,7 @@ class EventView(discord.ui.View):
         self.max_participants = max_participants
         self.title = title
 
-    @discord.ui.button(label="Join", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, custom_id="event_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         signups = event_signups.get(self.message_id)
@@ -147,8 +224,9 @@ class EventView(discord.ui.View):
             await interaction.response.send_modal(modal)
         else:
             await interaction.response.send_message("Sorry, the event is full. Use the Waitlist button to join the waitlist.", ephemeral=True)
+        save_events()
 
-    @discord.ui.button(label="Waitlist", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Waitlist", style=discord.ButtonStyle.primary, custom_id="event_waitlist")
     async def waitlist(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         signups = event_signups.get(self.message_id)
@@ -181,8 +259,9 @@ class EventView(discord.ui.View):
         await message.edit(embed=embed)
 
         await interaction.response.send_message("You have been added to the waitlist.", ephemeral=True)
+        save_events()
 
-    @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger, custom_id="event_leave")
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         signups = event_signups.get(self.message_id)
@@ -229,8 +308,9 @@ class EventView(discord.ui.View):
             await interaction.response.send_message("You have left the event.", ephemeral=True)
         else:
             await interaction.response.send_message("You are not in the event or waitlist.", ephemeral=True)
+        save_events()
 
-    @discord.ui.button(label="🔚", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🔚", style=discord.ButtonStyle.secondary, custom_id="event_finish")
     async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Only event creator can finish
         if interaction.user.id not in allowed_user_ids:
@@ -238,6 +318,7 @@ class EventView(discord.ui.View):
             return
 
         await interaction.response.send_modal(FinishAdventureModal(self))
+        save_events()
 
     async def update_message(self, interaction: discord.Interaction):
         data = event_signups[self.message_id]
@@ -250,6 +331,7 @@ class EventView(discord.ui.View):
         embed.set_field_at(2, name="🕒 Waitlist", value=waitlist_list, inline=True)
 
         await interaction.message.edit(embed=embed, view=self)
+        save_events()
 
 
 class FinishAdventureModal(discord.ui.Modal, title="Finish Adventure"):
@@ -302,6 +384,7 @@ class FinishAdventureModal(discord.ui.Modal, title="Finish Adventure"):
         event_signups.pop(self.view.message_id, None)
 
         await interaction.response.send_message("Adventure finished and archived!", ephemeral=True)
+        save_events()
 
 # Event tracking
 event_signups = {}
@@ -436,6 +519,7 @@ async def event(
     view = EventView(message.id, max_participants, title)
     view.message = message  # Store reference to original message
     await message.edit(view=view)
+    save_events()
 
 # ---- Vault commands ----
 
@@ -526,7 +610,7 @@ async def additem(
         "rarity": rarity.value if rarity else "Common",
         "types": types.value if types else "Other"
     })
-
+    save_vault()
     embed = discord.Embed(
         title="Item Added",
         color=discord.Color.green()
@@ -572,6 +656,7 @@ async def removeitem(
             and item.get("types", "Other") == target_type):
             del items[i]
             found = True
+            save_vault()
             break
 
     if found:
@@ -654,6 +739,8 @@ async def importvaultfile(interaction: discord.Interaction, file: discord.Attach
 
         vault.clear()
         vault.update({int(k): v for k, v in new_vault.items()})
+        save_vault()
+
         await interaction.response.send_message("Vault imported successfully!", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"Error importing: {e}", ephemeral=True)
@@ -847,10 +934,20 @@ async def help_command(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
+    load_events()  # restore from disk
+    load_vault()   # restore vault
+
     guild = discord.Object(id=GUILD_ID)
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
+
+    # Re-attach views for all saved events
+    for message_id, data in event_signups.items():
+        view = EventView(message_id, data["max_participants"], data["title"])
+        bot.add_view(view, message_id=message_id)
+
     print(f"✅ Logged in as {bot.user} and synced commands to guild {GUILD_ID}")
+    save_events()
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error):
